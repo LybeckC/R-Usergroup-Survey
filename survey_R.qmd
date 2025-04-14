@@ -1,0 +1,1384 @@
+---
+title: "PHAC R Usergroup annual Survey Results"
+author: "Clybeck"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    html-math-method: katex
+    css: styles.css
+comments:
+  utterances:
+    repo: https://github.com/LybeckC/R-Usergroup-Survey  
+    
+---
+
+## Quarto
+
+The PHAC R User group survey results were analyzed in R through Quarto. Quarto enables you to weave together content and executable code into a finished document. Learn more about Quarto [here](https://quarto.org).
+
+## Running Code
+
+When you click the **Render** button a document will be generated that includes both content and the output of embedded code. 
+```{r}
+#The default output from Quarto is not self contained, if you want everything included in one file after you Render it, the code below will have to be in the YAML header. 
+
+#format: 
+#  html:
+#    self-contained: true
+```
+
+```{r Setup, include=FALSE}
+library(pacman) #installs and loads necessary packages
+
+p_load(here,
+       readxl,
+       openxlsx,
+       tidyverse,
+       janitor, #data cleaning
+       scales,
+       ggtext,
+       viridis,
+       cowplot, #cowplot doesn't support certain fonts such as Calibri
+       patchwork, 
+       RColorBrewer,
+       #wordcloud,
+       kableExtra,
+       extrafont, # so we can use the same font in the figures
+       showtext,
+       )
+
+theme_survey <- function(){
+  ggplot2::theme(
+    # Specifies the font type and size for the entire graph
+    text = element_text(family = "Calibri", size=15),         
+    # the only fonts R really likes are the boring ones (Arial, Sans, etc)  
+    
+    # Line color for axes
+    axis.line = element_line(color = 'black'),
+    
+    # Background of plot to clear/blank
+    plot.background = element_blank(), 
+    
+    # Same as above for the panel
+    panel.background = element_blank(), 
+    
+    # Removing minor grid lines
+    panel.grid.minor = element_blank(),
+    
+    # Legend specifications
+    legend.position = "bottom",                                   
+    legend.title = element_blank(),                               
+    legend.key = element_blank(), 
+    
+    # Text and background for facet_wrap titles
+    strip.text = element_markdown(color = "white", size = 16),        
+    strip.background = element_rect(fill="black", color="black"), 
+    
+    # Axis specifications
+    axis.text = element_text(size=12),                           
+    axis.title = element_text(size=12),                          
+    axis.title.x = element_text(size=12),
+    
+    # NEED THIS FOR BILINGUAL TEXT element_markdown allows ggplot to read html
+    axis.title.y = element_markdown(),
+    #axis.title.x = element_markdown(), #if you want html in the x axis, suggest changing from element_blank() in line 64
+    legend.text = element_markdown(),
+    plot.title = element_markdown()
+    
+  )
+}
+
+# Custom color palettes
+yes_no_color <- c("#CEEDDB", # honeydew
+                  "#E99F9E", # salmon
+                  "#8B728E") # purple-ish
+
+three_colors <- c("#85BAA1", # Cambridge blue
+                  "#5995ED", # pink
+                  "#67597A") # purple
+
+eight_colors <- c("#7768AE","#9C4D95","#FFCD29","#38C5CB","#F77271","#C1B8C8","#4D9DE0","#3BB273")
+
+# Define 'not in'
+"%!in%" <- Negate("%in%")
+
+```
+## Process Flow
+
+```{mermaid}
+
+flowchart LR
+  A[Develop Survey] --> B(Collect responses)
+  B --> C[Data cleaning]
+  C --> D[Analysis]
+  D --> E[Data visualization]
+  C --> F(Recoding variables)
+  C --> G(Formatting)
+  
+```
+Mermaid can be used in Quarto to create process flow diagrams. 
+For more information:
+[Quarto](https://quarto.org/docs/authoring/markdown-basics.html) and [Mermaid](https://mermaid.js.org/intro/getting-started.html).
+
+
+## Import the survey data
+Export the excel files from MS forms into the format of your choice. In this case we have two excel files for the survey results, one for 2023 and one for 2024.
+```{r}
+#| echo: false
+
+## Clean names and add a year variable to merge all the data together
+
+#2023 survey results
+survey_2023 <- read_excel("survey_2023.xlsx")
+survey_2023 <- survey_2023 %>% mutate(year=2023) %>% clean_names()
+
+#2024 and 2025 use the same questions and format, 2023 used scales (that were not very helpful)
+#2024 survey results
+survey_2024 <- read_excel("survey_2024.xlsx") 
+survey_2024 <- survey_2024 %>% mutate(year=2024) %>% clean_names()
+
+#2025 survey results
+survey_2025 <- read_excel("survey_2025.xlsx") 
+survey_2025 <- survey_2025 %>% mutate(year=2025) %>% clean_names()
+# Manually recoded "Connecting to Sharepoint; ggplot 101" to "Connecting to Sharepoint & ggplot 101"
+# did not want to use any names in the code (these would have to be removed)
+
+#merge the most recent surveys in the same format
+survey_data <- bind_rows(survey_2024,survey_2025)
+
+
+#min/max years
+min_year <- 2023
+max_year <- 2025
+
+# Lets calculate the average survey completion time
+# change the start_time and completion_time columns to a date
+survey_2025$start_time <- ymd_hms(survey_2025$start_time)
+survey_2025$completion_time <- ymd_hms(survey_2025$completion_time)
+
+# Calculate time taken for each response in seconds
+survey_2025$time_taken_minutes <- as.numeric(difftime(survey_2025$completion_time, survey_2025$start_time, units = "mins"))
+
+# After a quick check, it looks like there are some outliers - maybe these were surveys that were left open
+# going to exclude surveys that took over 35 mins in the average (it should have only took about 6 mins according to MS forms)
+# If you want to exclude or include, you can use filter.
+average_completion_time_minutes <- survey_2025 %>%
+  filter(time_taken_minutes < 35) #time taken is less than 35
+
+# Calculate average completion time in minutes
+average_completion_time <- mean(average_completion_time_minutes$time_taken_minutes, na.rm = TRUE)
+
+# round up
+average_completion_round <- round(average_completion_time)
+
+# Next, lets count the number of responses
+count_2025 <- nrow(survey_2025)
+
+# We are going to use these counts in the summary details below, using inline code. This will be displayed as an un-ordered list (<ul> <ls> list item </ls> </ul>)
+
+```
+
+```{r, eval=FALSE}
+
+#How many people did we send the survey to these years?
+#exported the emails from the dist list when we sent the surveys or, if that was not available, the earliest lunch and learn for the year (except the data bricks one)
+
+files <- list.files(path = here(), pattern = "\\.txt$", full.names = TRUE)
+
+
+email_counts <- sapply(files, function(file) {
+  text <- read_file(file)
+  email_list <- strsplit(text, ";")[[1]]
+  length(trimws(email_list)) 
+})
+
+
+data.frame(file = basename(files), count = email_counts)
+
+#according to google, old invites or emails with the dist-list(if it was not expanded at the time it was sent) will always export the current members in the list. So this won't work, differences here would be in the external emails.... 
+
+```
+
+
+::: {.callout-important}
+Note that the results displayed are descriptive in nature. There are a number of limitations to the interpretation, however - we can use the survey results to gain some insight from those that responded.
+:::
+
+## 2025 survey results
+Summary details:
+
+* This survey was distributed in Feb `r max_year`.
+* The average completion time for this survey was approximately <b> `r average_completion_round`</b> minutes^1^.
+*  There were <b>`r count_2025`</b> surveys completed.
+
+^1^ Three responses were excluded in this calculation, as they exceeded 35 minutes.
+
+::: {.callout-note}
+</b> Reminder:</b> All surveys cover the evaluation of the PHAC R Usergroup for the previous year (e.g. The 2025 survey evaluates activities in 2024).
+:::
+
+### 1) When did you join the PHAC R User group?
+```{r}
+#| echo: false
+
+# For the ease of learning for beginners, the data analysis and visualization will be completed in a way that is hopefully easy to understand/follow - can be adjusted to me more efficient. I'm taking each column and isolating it in a separate data frame.
+
+#to list all the variables in your dataframe, remove the # in the next line (un-comment)
+# ls(survey_2025)
+
+# once you decide which columnns you want to keep, you can use select
+when_joined <- survey_2025 %>%
+  select(id,when_did_you_join_the_phac_r_user_group)
+
+# Next we can summarize our data - you can also complete this in the last step using a pipe (%>%)
+
+when_joined2 <- when_joined %>%
+  group_by(when_did_you_join_the_phac_r_user_group) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+
+fig1 <- when_joined2 %>%
+  ggplot(aes(x = fct_relevel(when_did_you_join_the_phac_r_user_group, 
+                             "before 2023",
+                             "2023",
+                             "2024",
+                             "2025"),
+             y = proportion, 
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = c("#7768AE","#9C4D95","#FFCD29","#38C5CB")) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+ # scale_fill_viridis_c(option = "viridis", guide = "none") + #if you want to use viridis
+  geom_text(size = 4, vjust = -0.5, family = "Calibri") +
+  labs(x = "Responses",
+       y = "Percent (%)") +
+  #ggtitle(paste("Question 1) When did you join the PHAC R User group", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig1
+
+```
+
+### 2) Which presentations did you attend (in the past 12 months)?
+Select all that apply.
+```{r, out.width="100%", out.height="auto", dpi=300, fig.align='right'}
+#| echo: false
+#| warning: false
+
+which_presentations <- survey_2025 %>%
+  select(id,which_presentations_did_you_attend_over_the_past_12_months_select_all_that_apply)
+
+# This column needs some cleaning, since it was a select all that apply question, we have a list in the responses. We need to parse these out! For simplicity, I'm going to separate them by ; and keep the presentation titles
+
+# Create a new variable by splitting the values into separate columns
+which_presentations2 <- which_presentations %>%
+  separate(which_presentations_did_you_attend_over_the_past_12_months_select_all_that_apply, 
+           into = paste0("col", 1:12), sep = ";")
+
+# Remove the cols that have the presenters
+which_presentations3 <- which_presentations2 %>%
+  select(id,col1,col3,col5,col7,col9,col11)
+
+
+# Pivot the data longer
+long_which_presentations <- which_presentations3 %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_which_presentations1 <- long_which_presentations %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+long_which_presentations2 <- long_which_presentations1 %>%
+  group_by(responses) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+long_which_presentations2$responses <- factor(long_which_presentations2$responses, 
+     levels = long_which_presentations2$responses[order(-long_which_presentations2$proportion)])
+
+
+fig2 <- long_which_presentations2 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses, 
+                             "Version control using Github",
+                             "Intro to report building",
+                             "Using Python, Javascript and R in Quarto for Data Analysis",
+                             "Report building",
+                             "Forecasting in R",
+                             "Implementing differential privacy in R",
+                             "None"),
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "#D0E3C4") +
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Percent (%)",
+       y = NA) +
+ # ggtitle(paste("Question 2) Which presentations did you attend", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig2
+
+```
+### 3) How would you describe yourself as an R user?
+```{r}
+#| echo: false
+#| warning: false
+#repeat! or create functions earlier to streamline this process 
+self_described <- survey_2025 %>%
+  select(id,how_would_you_describe_yourself_as_an_r_user) %>%
+  group_by(how_would_you_describe_yourself_as_an_r_user) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+fig3 <- self_described %>%
+  ggplot(aes(x = fct_relevel(how_would_you_describe_yourself_as_an_r_user,
+                             "Beginner",
+                             "Intermediate",
+                             "Advanced"),
+             y = proportion, 
+             label = proportion, 
+             fill = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = three_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Percent (%)") +
+  #ggtitle(paste("Question 1) When did you join the PHAC R User group", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig3
+```
+
+### 4) How often do you user R at work?
+```{r}
+#| echo: false
+#| warning: false
+freq_use <- survey_2025 %>%
+  select(id,how_often_do_you_user_r_at_work) %>%
+  group_by(how_often_do_you_user_r_at_work) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+fig4 <- freq_use  %>%
+  ggplot(aes(x = fct_relevel(how_often_do_you_user_r_at_work,
+                             "Occasionally",
+                             "Frequently",
+                             "Never"),
+             y = proportion, 
+             label = proportion, 
+             fill = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = three_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Percent (%)") +
+  #ggtitle(paste("Title", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig4
+
+```
+
+### 5) If possible, would you like to be using R more often at work?
+
+Here is a pie chart for the Haters. Since it is here just to show it can be done, it is also very basic with almost ZERO formatting. 
+This can also be done using ggplot but the plot below is a base R special.
+
+[The issue with pie chart](https://www.data-to-viz.com/caveat/pie.html)
+
+```{r}
+#| echo: false
+#| warning: false
+
+more_use <- survey_2025 %>%
+  select(id,if_possible_would_you_like_to_be_using_r_more_often_at_work) %>%
+  group_by(if_possible_would_you_like_to_be_using_r_more_often_at_work) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# fig5 <- freq_use  %>%
+#   ggplot(aes(x = fct_relevel(if_possible_would_you_like_to_be_using_r_more_often_at_work,
+#                              "Yes",
+#                              "Maybe",
+#                              "No"),
+#              y = proportion, 
+#              label = proportion, 
+#              fill = proportion)) +
+#   geom_bar(stat = "identity", position = "dodge") +
+#   scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+#   scale_fill_viridis_c(option = "viridis", guide = "none") +
+#   geom_text(size = 3, vjust = -0.5) +
+#   labs(x = "Responses",
+#        y = "Proportion (%)") +
+#   #ggtitle(paste("Title", max_year)) +
+#   theme(plot.title = element_text(size = 12)) +
+#   theme(plot.caption = element_text(hjust=0)) +
+#   theme_survey() 
+# 
+# fig5
+
+pie(more_use$proportion,
+   labels = c("Maybe","No","Yes"),
+   col = three_colors)
+
+```
+
+### 6) What is preventing you from using R more often? 
+Select all that apply
+```{r}
+#| echo: false
+#| warning: false
+
+# this also needs to be cleaned up!
+preventing_r <- survey_2025 %>%
+  select(id,what_is_preventing_you_from_using_r_more_often_select_all_that_apply) %>%
+  separate(what_is_preventing_you_from_using_r_more_often_select_all_that_apply, 
+           into = paste0("col", 1:3), sep = ";")
+
+# Pivot the data longer
+long_preventing_r  <- preventing_r %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_preventing_r1 <- long_preventing_r  %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+# This question had a number of other responses, need to recode
+#look at the responses that are in the questionnaire, recode the rest to Other
+
+#unique(long_preventing_r1$responses) #can use to check the unique responses
+
+#here I am creating a list of the responses in the question
+response_options <- c("Installing and updating software (R, RStudio, and packages)",
+                      "Steep learning curve",
+                      "Lack of management support",
+                      "Lack of technical support",
+                      "Not applicable - I am using R an adequate amount")
+
+long_preventing_r2 <- long_preventing_r1 %>%
+  mutate(responses2 = case_when(responses %!in% response_options ~"Other",
+                               T ~ responses))
+# one could do additional cleaning here but I'm leaving this as is 
+
+
+long_preventing_r3 <- long_preventing_r2 %>%
+  group_by(responses2) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# 
+fig6 <- long_preventing_r3 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses2, 
+                             "Other",
+                             "Not applicable - I am using R an adequate amount",
+                             "Steep learning curve",
+                             "Lack of technical support",
+                             "Installing and updating software (R, RStudio, and packages)",
+                             "Lack of management support"),
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "#D0E3C4") +
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+ # ggtitle(paste("Question 2) Which presentations did you attend", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig6
+
+#Lets also look at the Other responses
+other_preventing_r <- long_preventing_r2 %>%
+  filter(responses2 == "Other") %>%
+  select(responses) %>%
+  rename("Other responses" = responses)
+
+kable(other_preventing_r, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+### 7) Have any of the presentations enhanced your working knowledge of R and/or your level of data literacy in general?
+```{r}
+#| echo: false
+#| warning: false
+
+enhanced_presentations <- survey_2025 %>%
+  select(id,have_any_of_the_presentations_enhanced_your_working_knowledge_of_r_and_or_your_level_of_data_literacy_in_general) %>%
+  group_by(have_any_of_the_presentations_enhanced_your_working_knowledge_of_r_and_or_your_level_of_data_literacy_in_general) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+fig7 <- enhanced_presentations %>%
+  ggplot(aes(x = fct_relevel(have_any_of_the_presentations_enhanced_your_working_knowledge_of_r_and_or_your_level_of_data_literacy_in_general,
+                             "Yes",
+                             "Maybe",
+                             "No"),
+             y = proportion,
+             label = proportion,
+             fill = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill=yes_no_color) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  #scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  #ggtitle(paste("Title", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey()
+
+fig7
+
+```
+
+### 8) What other programs do you use for data analysis at work? 
+Select all that apply
+```{r}
+#| echo: false
+#| warning: false
+
+other_programs <- survey_2025 %>%
+  select(id,what_other_programs_do_you_use_for_data_analysis_at_work_select_all_that_apply) %>%
+  separate(what_other_programs_do_you_use_for_data_analysis_at_work_select_all_that_apply, 
+           into = paste0("col", 1:4), sep = ";")
+
+# Pivot the data longer
+long_other_programs  <- other_programs %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells
+long_other_programs1 <- long_other_programs  %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+# List
+response_options2 <- c("SAS (PC, EG, VIYA, etc.)",
+                      "Stata",
+                      "Excel",
+                      "Power BI",
+                      "Tableau",
+                      "Python",
+                      "None")
+
+long_other_programs2 <- long_other_programs1 %>%
+  mutate(responses2 = case_when(responses %!in% response_options2 ~"Other",
+                               T ~ responses))
+# one could do additional cleaning here but I'm leaving this as is 
+
+
+long_other_programs3 <- long_other_programs2 %>%
+  group_by(responses2) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# lets make this a lollipop plot
+fig8 <- long_other_programs3 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses2, 
+                             "Excel",
+                             "SAS (PC, EG, VIYA, etc.)",
+                             "Power BI",
+                             "Python",
+                             "None",
+                             "Other",
+                             "Stata",
+                             "Tableau"),
+             label = proportion)) +
+  geom_segment(aes(xend = 0, yend = fct_relevel(responses2, 
+                                                 "Excel",
+                                                 "SAS (PC, EG, VIYA, etc.)",
+                                                 "Power BI",
+                                                 "Python",
+                                                 "None",
+                                                 "Other",
+                                                 "Stata",
+                                                 "Tableau")),
+               color = "#D0E3C4") +  # Change color as desired
+  geom_point(size = 4, color = "#D0E3C4", fill = "white") +  # Change color and size as desired
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust = 0)) +
+  theme_survey()
+
+fig8
+
+#Lets also look at the Other responses
+other_programs <- long_other_programs2 %>%
+  filter(responses2 == "Other") %>%
+  select(responses)%>%
+  rename("Other responses" = responses)
+
+kable(other_programs, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+
+```
+
+### 9) Would you be interested in learning Python^1^ in this user group? 
+
+^1^Python is a programming language that is commonly used in the data community. 
+```{r}
+#| echo: false
+#| warning: false
+
+# The name of this var is too long, renaming
+python_question <- survey_2025 %>%
+rename(python = would_you_be_interested_in_learning_python_in_this_user_group_like_r_python_is_a_programming_language_that_is_commonly_used_in_the_data_community)
+
+python_question <- python_question %>%
+  select(id,python) %>%
+  group_by(python) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+
+fig9 <- python_question %>%
+  ggplot(aes(x = fct_relevel(python,
+                             "Yes",
+                             "Maybe",
+                             "No"),
+             y = proportion,
+             label = proportion,
+             fill = proportion)) +
+  geom_bar(stat = "identity", fill = yes_no_color) + 
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  #scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  #ggtitle(paste("Title", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey()
+
+fig9
+
+```
+
+### 10) Do you use R Studio? 
+
+If not, please describe in the 'Other' box how you usually work with R
+```{r}
+#| echo: false
+#| warning: false
+
+# The name of this var is too long, renaming
+rstudio_question <- survey_2025 %>%
+rename(rstudio = do_you_use_r_studio_if_not_please_describe_in_the_other_box_how_you_usually_work_with_r)
+
+rstudio_question <- rstudio_question %>%
+  select(id,rstudio) %>%
+  group_by(rstudio) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+rstudio_question <- rstudio_question %>%
+  arrange(desc(proportion)) %>%
+  rename("Other responses" = rstudio,
+         "Total" = denom,
+         "Proportion (%)" = proportion)
+
+kable(rstudio_question, format = "html") %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, background = "lightblue")
+
+```
+
+### 11) Would you and your team benefit if a product such as Posit Connect were provisioned for the whole organization? 
+
+This can make it easier for your team to collaborate and share your work with one another. More info [here](https://posit.co/products/enterprise/connect/). 
+
+```{r}
+#| echo: false
+#| warning: false
+
+# The name of this var is way too long
+# Rename
+posit_question <- survey_2025 %>%
+rename(posit = would_you_and_your_team_benefit_if_a_product_such_as_posit_connect_were_provisioned_for_the_whole_organization_this_can_make_it_easier_for_your_team_to_collaborate_and_share_your_work_with_one_an)
+
+posit_question  <- posit_question  %>%
+  select(id,posit) %>%
+  group_by(posit) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+
+fig11 <- posit_question %>%
+  ggplot(aes(x = fct_relevel(posit,
+                             "Yes",
+                             "Maybe",
+                             "No"),
+             y = proportion,
+             label = proportion,
+             fill = proportion)) +
+  geom_bar(stat = "identity", fill = yes_no_color) + 
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  #scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  #ggtitle(paste("Title", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey()
+
+fig11
+
+```
+
+### 12) Would you like to see the PHAC R User Group hold more activities and events?
+```{r}
+#| echo: false
+#| warning: false
+
+# Rename
+more_activities <- survey_2025 %>%
+rename(more_act = would_you_like_to_see_the_phac_r_user_group_hold_more_activities_and_events)
+
+more_activities  <- more_activities  %>%
+  select(id,more_act) %>%
+  group_by(more_act) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+
+fig12 <- more_activities %>%
+  ggplot(aes(x = fct_relevel(more_act,
+                             "Yes",
+                             "Maybe",
+                             "No"),
+             y = proportion,
+             label = proportion,
+             fill = proportion)) +
+  geom_bar(stat = "identity", fill = yes_no_color) + 
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+ # scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  #ggtitle(paste("Title", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey()
+
+fig12
+
+```
+
+### 13) (Optional) Do you have any other feedback you would like to share with us to help improve the PHAC R User Group?
+```{r, out.width="100%", out.height="auto", dpi=300, fig.align='center'}
+#| echo: false
+#| warning: false
+
+feedback_question <- survey_2025 %>%
+  rename(Feedback = optional_do_you_have_any_other_feedback_you_would_like_to_share_with_us_to_help_improve_the_phac_r_user_group) %>%
+  select(Feedback) %>%
+  filter(!is.na(Feedback)) 
+ 
+# One could also do some text mining and create a Word cloud 
+
+kable(feedback_question, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+### 14) (Optional) In the future, what are some topics of interest you would like to see presentations for?
+```{r}
+#| echo: false
+#| warning: false
+
+suggested_topics <- survey_2025 %>%
+  select(optional_in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for) %>%
+  filter(!is.na(optional_in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for)) %>%
+  rename('Suggested topics' = optional_in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for)
+
+kable(suggested_topics, format = "html") %>%
+  kable_styling(full_width = FALSE)
+ 
+
+```
+
+### 15) Do you have any other feedback you would like to share with us to help improve the PHAC R User Group?
+```{r, out.width="100%", out.height="auto", dpi=300, fig.align='center'}
+#| echo: false
+#| warning: false
+
+
+feedback_2023 <- survey_2023 %>%
+  rename(Feedback = do_you_have_any_other_feedback_you_would_like_to_share_with_us_to_help_improve_the_phac_r_user_group) %>%
+  select(Feedback) %>%
+  filter(!is.na(Feedback)) 
+
+kable(feedback_2023, format = "html") %>%
+  kable_styling(full_width = FALSE)
+```
+
+### 16) In the future, what are some topics of interest you would like to see presentations for?
+```{r, out.width="100%", out.height="auto", dpi=300, fig.align='center'}
+#| echo: false
+#| warning: false
+
+suggested_topics_2023 <- survey_2023 %>%
+  select(in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for) %>%
+  filter(!is.na(in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for)) %>%
+  rename('Suggested topics' = in_the_future_what_are_some_topics_of_interest_you_would_like_to_see_presentations_for)
+
+kable(suggested_topics_2023, format = "html") %>%
+  kable_styling(full_width = FALSE)
+ 
+```
+
+```{r}
+#| echo: false
+#| warning: false
+
+#2023 survey
+survey_2023 <- survey_2023 %>%
+  clean_names()
+
+#Survey completion time
+survey_2023$start_time <- ymd_hms(survey_2023$start_time)
+survey_2023$completion_time <- ymd_hms(survey_2023$completion_time)
+
+# Calculate time taken for each response in seconds
+survey_2023$time_taken_minutes <- as.numeric(difftime(survey_2023$completion_time, survey_2023$start_time, units = "mins"))
+
+# If you want to exclude or include, you can use filter.
+average_completion_time_minutes_2023 <- survey_2023 %>%
+  filter(time_taken_minutes < 35) #time taken is less than 35
+
+# Calculate average completion time in minutes
+average_completion_time_2023 <- mean(average_completion_time_minutes_2023$time_taken_minutes, na.rm = TRUE)
+
+# round up
+average_completion_round_2023 <- round(average_completion_time_2023)
+
+# Next, lets count the number of responses
+count_2023 <- nrow(survey_2023)
+
+```
+
+# Comparing results to other years
+
+## `r min_year` survey results
+Summary details:
+
+* This survey was distributed in May `r min_year`.
+* The average completion time for this survey was approximately <b> `r average_completion_round_2023`</b> minutes^1^.
+*  There were <b>`r count_2023`</b> surveys completed.
+
+^1^ Four responses were excluded in this calculation, as they exceeded 35 minutes.
+
+::: {.callout-note}
+Note that only select questions are shown for the 2023 survey. Questions that had a scale are not included.
+:::
+
+### 1) When did you join the PHAC R User group?
+```{r}
+#| echo: false
+#| warning: false
+
+when_joined_min_year <- survey_2023 %>%
+  select(id,when_did_you_join_the_phac_r_user_group)
+
+when_joined_min_year2 <- when_joined_min_year %>%
+  group_by(when_did_you_join_the_phac_r_user_group) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+fig1.1 <- when_joined_min_year2  %>%
+  ggplot(aes(x = fct_relevel(when_did_you_join_the_phac_r_user_group, 
+                             "Before 2023",
+                             "2023"),
+             y = proportion, 
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = c(three_colors[1], three_colors[3])) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  #ggtitle(paste("Question 1) When did you join the PHAC R User group", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig1.1
+
+```
+#### `r min_year` vs `r max_year`
+
+```{r}
+#| echo: false
+#| warning: false
+
+# Add figure titles
+fig1 <- fig1 + ggtitle(paste("B)", max_year,",", count_2025, "responses")) 
+  
+fig1.1 <- fig1.1 + ggtitle(paste("A)", min_year,",", count_2023, "responses"))
+
+# Arrange fig1 and fig1.1 horizontally
+combined_figures <- fig1.1 + fig1 
+
+combined_figures
+```
+### 2) How would you describe yourself as an R user?
+This was Question 3 in the 2024/2025 survey.
+```{r}
+#| echo: false
+#| warning: false
+
+self_described_2023 <- survey_2023 %>%
+  select(id,how_would_you_describe_yourself_as_an_r_user) %>%
+  group_by(how_would_you_describe_yourself_as_an_r_user) %>% 
+  summarise(n=n()) %>% 
+  mutate(denom = sum(n, na.rm=T)) %>% 
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+fig3.1 <- self_described_2023  %>%
+  ggplot(aes(x = fct_relevel(how_would_you_describe_yourself_as_an_r_user,
+                             "Beginner",
+                             "Intermediate",
+                             "Advanced"),
+             y = proportion, 
+             label = proportion, 
+             fill = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = three_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0,0.2))) +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Responses",
+       y = "Proportion (%)") +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig3.1
+
+```
+
+#### `r min_year` vs `r max_year`
+
+```{r}
+#| echo: false
+#| warning: false
+
+fig3 <- fig3 + ggtitle(paste("B)", max_year,",", count_2025, "responses")) 
+
+fig3.1 <- fig3.1 + ggtitle(paste("A)", min_year,",", count_2023, "responses"))
+
+# Arrange 
+combined_figures3 <- fig3.1 + fig3 
+
+combined_figures3
+```
+
+### 5) What is preventing you from using R more often? 
+Select all that apply
+```{r}
+#| echo: false
+#| warning: false
+
+# this also needs to be cleaned up!
+preventing_r_2023 <- survey_2023 %>%
+  select(id,what_is_preventing_you_from_using_r_more_often_select_all_that_apply) %>%
+  separate(what_is_preventing_you_from_using_r_more_often_select_all_that_apply, 
+           into = paste0("col", 1:3), sep = ";")
+
+# Pivot the data longer
+long_preventing_r_2023  <- preventing_r_2023 %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_preventing_r1_2023 <- long_preventing_r_2023  %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+response_options <- c("Installing and updating software (R, RStudio, and packages)",
+                      "Steep learning curve",
+                      "Lack of management support",
+                      "Lack of technical support",
+                      "Not applicable - I am using R an adequate amount")
+
+long_preventing_r2_2023 <- long_preventing_r1_2023 %>%
+  mutate(responses2 = case_when(responses %!in% response_options ~"Other",
+                               T ~ responses))
+# one could do additional cleaning here but I'm leaving this as is 
+
+
+long_preventing_r3_2023 <- long_preventing_r2_2023 %>%
+  group_by(responses2) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# 
+fig6.1 <- long_preventing_r3_2023 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses2, 
+                             "Other",
+                             "Not applicable - I am using R an adequate amount",
+                             "Steep learning curve",
+                             "Lack of technical support",
+                             "Installing and updating software (R, RStudio, and packages)",
+                             "Lack of management support"),
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "#E99F9E") +
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+ # ggtitle(paste("Question 2) Which presentations did you attend", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig6.1
+
+#Lets also look at the Other responses
+other_preventing_r_2023 <- long_preventing_r2_2023 %>%
+  filter(responses2 == "Other") %>%
+  select(responses) %>%
+  rename("Other responses" = responses)
+
+kable(other_preventing_r_2023, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+#### `r min_year` vs `r max_year`
+
+```{r}
+#| echo: false
+#| warning: false
+
+fig6 <- fig6 + ggtitle(paste("B)", max_year,",", count_2025, "responses")) 
+  
+fig6.1 <- fig6.1 + ggtitle(paste("A)", min_year,",", count_2023, "responses"))
+
+# Arrange 
+combined_figures6 <- fig6.1 / fig6 
+
+combined_figures6
+```
+
+### 6) Which presentations did you attend (in the past 12 months)?
+Select all that apply.
+* Question 2 in 2025.
+```{r, out.width="100%", out.height="auto", dpi=300, fig.align='center'}
+#| echo: false
+#| warning: false
+
+which_presentations_2023 <- survey_2023 %>%
+  select(id,which_presentations_did_you_attend_over_the_past_12_months_select_all_that_apply)
+
+# This column needs some cleaning, since it was a select all that apply question, we have a list in the responses. We need to parse these out! For simplicity, I'm going to separate them by ; and keep the presentation titles
+
+# Create a new variable by splitting the values into separate columns
+which_presentations2_2023 <- which_presentations_2023 %>%
+  separate(which_presentations_did_you_attend_over_the_past_12_months_select_all_that_apply, 
+           into = paste0("col", 1:12), sep = ";")
+
+# Remove the cols that have the presenters
+which_presentations3_2023 <- which_presentations2_2023 %>%
+  select(id,col1,col3,col5,col7,col9,col11)
+
+# Pivot the data longer
+long_which_presentations_2023 <- which_presentations3_2023 %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_which_presentations1_2023 <- long_which_presentations_2023 %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+long_which_presentations2_2023 <- long_which_presentations1_2023 %>%
+  group_by(responses) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+
+fig2.1 <- long_which_presentations2_2023 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses, 
+                             "Tools for R Users",
+                             "Canadianmaps package",
+                             "PHACTrendR package",
+                             "Having FUN with Functions",
+                             "Intro to Databricks",
+                             "Automating STI analysis using CNDSS and Statscan population data"),
+             label = proportion)) +
+  geom_bar(stat = "identity", position = "dodge", fill = "#E99F9E") +
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  scale_fill_viridis_c(option = "viridis", guide = "none") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+ # ggtitle(paste("Question 2) Which presentations did you attend", max_year)) +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust=0)) +
+  theme_survey() 
+
+fig2.1
+
+```
+
+### 8) What other programs do you use for analysis? 
+Select all that apply
+```{r}
+#| echo: false
+#| warning: false
+
+# this also needs to be cleaned up!
+other_programs_2023 <- survey_2023 %>%
+  select(id,what_other_programs_do_you_use_for_analysis_select_all_that_apply) %>%
+  separate(what_other_programs_do_you_use_for_analysis_select_all_that_apply, 
+           into = paste0("col", 1:4), sep = ";")
+
+# Pivot the data longer
+long_other_programs_2023  <- other_programs_2023 %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_other_programs1_2023 <- long_other_programs_2023  %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+#here I am creating a list of the responses in the question
+response_options2_2023 <- c("SAS (PC, EG, VIYA, etc.)",
+                      "Stata",
+                      "Excel",
+                      "Power BI",
+                      "Tableau",
+                      "Python")
+
+long_other_programs2_2023 <- long_other_programs1_2023 %>%
+  mutate(responses2 = case_when(responses %!in% response_options2_2023 ~"Other",
+                               T ~ responses))
+# one could do additional cleaning here but I'm leaving this as is 
+
+
+long_other_programs3_2023 <- long_other_programs2_2023 %>%
+  group_by(responses2) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# lets make this a lollipop plot
+fig8.1 <- long_other_programs3_2023 %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses2, 
+                             "Excel",
+                             "SAS (PC, EG, VIYA, etc.)",
+                             "Power BI",
+                             "Python",
+                             "None",
+                             "Other",
+                             "Stata",
+                             "Tableau"),
+             label = proportion)) +
+  geom_segment(aes(xend = 0, yend = fct_relevel(responses2, 
+                                                 "Excel",
+                                                 "SAS (PC, EG, VIYA, etc.)",
+                                                 "Power BI",
+                                                 "Python",
+                                                 "None",
+                                                 "Other",
+                                                 "Stata",
+                                                 "Tableau")),
+               color = "#D0E3C4") +  # Change color as desired
+  geom_point(size = 4, color = "#D0E3C4", fill = "white") +  # Change color and size as desired
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust = 0)) +
+  theme_survey()
+
+fig8.1
+
+#Lets also look at the Other responses
+other_programs_2023 <- long_other_programs2_2023 %>%
+  filter(responses2 == "Other") %>%
+  select(responses)%>%
+  rename("Other responses" = responses)
+
+kable(other_programs_2023, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+#### `r min_year` vs `r max_year`
+
+```{r}
+#| echo: false
+#| warning: false
+
+
+fig8 <- fig8 + ggtitle(paste("B)", max_year,",", count_2025, "responses")) 
+
+  
+fig8.1 <- fig8.1 + ggtitle(paste("A)", min_year,",", count_2023, "responses"))
+
+# Arrange fig1 and fig1.1 horizontally
+combined_figures8 <- fig8.1 + fig8 
+
+combined_figures8
+```
+
+### 12) Would you and your team be interested in formal R coaching/mentoring provided by PHAC peers? 
+
+This can help your team overcome the initial steep learning curve to start incorporating R in your workflow. 
+```{r}
+#| echo: false
+#| warning: false
+
+
+mentoring_2023 <- survey_2023 %>%
+  select(id,if_you_are_interested_in_formal_r_coaching_mentoring_how_will_you_best_benefit_select_all_that_apply) %>%
+  #rename
+  rename(mentoring = if_you_are_interested_in_formal_r_coaching_mentoring_how_will_you_best_benefit_select_all_that_apply) %>%
+  separate(mentoring, into = paste0("col", 1:4), sep = ";")
+
+# Pivot the data longer
+long_mentoring_2023  <- mentoring_2023 %>%
+  pivot_longer(cols = starts_with("col"), 
+               names_to = "column", 
+               values_to = "responses") #changing the column name 
+
+# select the columns, remove NAs & blank cells, and summarise the data!
+long_mentoring1_2023 <- long_mentoring_2023  %>%
+  select(id,responses) %>%
+  filter(!is.na(responses) & responses != "") 
+
+# This question also had some other responses, need to recode
+#look at the responses that are in the questionnaire, recode the rest to Other
+
+#here I am creating a list of the responses in the question
+response_mentoring_2023 <- c("MS Teams Q&A Space",
+                      "Drop-in office hours",
+                      "One-on-one sessions",
+                      "On-call help",
+                      "Not interested")
+
+long_mentoring2_2023 <- long_mentoring1_2023 %>%
+  mutate(responses2 = case_when(responses %!in% response_mentoring_2023 ~"Other",
+                               T ~ responses))
+# one could do additional cleaning here but I'm leaving this as is 
+
+
+long_mentoring3_2023 <- long_mentoring2_2023 %>%
+  group_by(responses2) %>% # group the responses in this column to count
+  summarise(n=n()) %>% # creates the count
+  mutate(denom = sum(n, na.rm=T)) %>% # create the denominator
+  mutate(proportion = round_half_up(n/denom*100,1))
+
+# lets make this a lollipop plot
+fig_m <- long_mentoring3_2023  %>%
+  ggplot(aes(x = proportion,
+             y = fct_relevel(responses2, 
+                      "MS Teams Q&A Space",
+                      "Drop-in office hours",
+                      "One-on-one sessions",
+                      "On-call help",
+                      "Not interested",
+                      "Other"),
+             label = proportion)) +
+  geom_segment(aes(xend = 0, yend = fct_relevel(responses2, 
+                      "MS Teams Q&A Space",
+                      "Drop-in office hours",
+                      "One-on-one sessions",
+                      "On-call help",
+                      "Not interested",
+                      "Other")),
+               color = "black") +  # Change color as desired
+  geom_point(size = 4, color = "#8B728E", fill = "white") +  # Change color and size as desired
+  scale_x_continuous(expand = expansion(mult = c(0,0.2))) +
+  labs(x = "Proportion (%)",
+       y = "Responses") +
+  geom_text(size = 4, vjust = -0.5, family="Calibri") +
+  theme(plot.title = element_text(size = 12)) +
+  theme(plot.caption = element_text(hjust = 0)) +
+  theme_survey()
+
+fig_m
+
+#Lets also look at the Other responses
+other_mentoring_2023 <- long_mentoring2_2023 %>%
+  filter(responses2 == "Other") %>%
+  select(responses)%>%
+  rename("Other responses" = responses)
+
+kable(other_mentoring_2023, format = "html") %>%
+  kable_styling(full_width = FALSE)
+
+```
+
+## 2022 survey results
+Summary details:
+
+* This survey was distributed in November 2020-January 2021.
+* It was distributed using Google forms.
+* There were <b> 16 </b> surveys completed.
+
+## 2021 survey results
+Summary details:
+
+* This survey was distributed in November 2021-January 2022.
+  * this was a housekeeping survey following the pandemic
+* It was distributed using Google forms.
+* There were <b> 27 </b> surveys completed.
+
+
+
+::: {.callout-warning collapse="true"}
+<b>Limitations include: </b>poor response rate, non-standardized questionnaires, the second survey was anonymous (we can't compare directly between years based on participants), may not be representative of the community as a whole, subject to bias etc.
+:::
